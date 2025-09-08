@@ -1,0 +1,13 @@
+[package]
+name = "eventsourcingdb-es"
+version = "0.1.0"
+authors = ["daniel-mader"]
+description = "An EventSourcingDB implementation of the cqrs-es event store."
+edition = "2024"
+repository = "https://github.com/impierce/eventsourcingdb-es"
+license = "Apache-2.0"
+keywords = ["cqrs", "event-sourcing", "eventsourcingdb", "cqrs-es"]
+
+[dependencies]
+cqrs-es = "0.4.12"
+eventsourcingdb = "0.11.0"
