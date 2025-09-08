@@ -1,0 +1,14 @@
+services:
+  eventsourcingdb:
+    image: thenativeweb/eventsourcingdb
+    container_name: eventsourcingdb
+    restart: always
+    ports:
+      - 3000:3000
+    command:
+      - run
+      - --api-token=secret
+      - --data-directory-temporary
+      - --http-enabled
+      - --https-enabled=false
+      - --with-ui
