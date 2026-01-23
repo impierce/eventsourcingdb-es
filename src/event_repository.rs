@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use cqrs_es::{
     Aggregate,
@@ -20,18 +22,18 @@ use crate::{
 
 /// An event repository using EventSourcingDB for persistence.
 pub struct EventSourcingDbEventRepository {
-    client: Client,
-    event_collection: String,
-    snapshot_collection: String,
+    client: Arc<Client>,
+    // event_collection: String,
+    // snapshot_collection: String,
     stream_channel_size: usize,
 }
 
 impl EventSourcingDbEventRepository {
     pub async fn new(client: Client) -> Result<Self, eventsourcingdb::error::ClientError> {
         let repository = Self {
-            client,
-            event_collection: "events".to_string(),
-            snapshot_collection: "snapshots".to_string(),
+            client: Arc::new(client),
+            // event_collection: "events".to_string(),
+            // snapshot_collection: "snapshots".to_string(),
             stream_channel_size: 100,
         };
         Ok(repository)
@@ -94,8 +96,6 @@ fn serialized_event(
 
     let (aggregate_type, aggregate_id) = map_subject_to_aggregate_type_and_id(event.subject());
 
-    println!("{:#?}", event);
-
     Ok(SerializedEvent {
         aggregate_id,
         sequence: event.id().parse().unwrap(),
@@ -103,7 +103,7 @@ fn serialized_event(
         event_type,
         event_version,
         payload: event.data().clone(),
-        metadata: json!({}),
+        metadata: json!({ "TODO": "unimplemented" }),
     })
 }
 
@@ -111,8 +111,6 @@ fn serialized_event(
 fn esdb_event_candidate(
     event: &SerializedEvent,
 ) -> Result<eventsourcingdb::EventCandidate, eventsourcingdb::error::EventError> {
-    println!("{:#?}", event);
-
     let subject = map_aggregate_type_and_id_to_subject(&event.aggregate_type, &event.aggregate_id);
 
     let ty = map_event_type_to_reverse_domain_name(&event.event_type, &event.event_version);
@@ -181,15 +179,43 @@ impl PersistedEventRepository for EventSourcingDbEventRepository {
         &self,
         aggregate_id: &str,
     ) -> Result<ReplayStream, PersistenceError> {
-        Err(PersistenceError::UnknownError(
-            "Not implemented: stream_events".into(),
-        ))
+        let subject = map_aggregate_type_and_id_to_subject(&A::aggregate_type(), aggregate_id);
+
+        let (mut feed, stream) = ReplayStream::new(self.stream_channel_size);
+
+        let client = Arc::clone(&self.client);
+
+        tokio::spawn(async move {
+            let mut event_stream = client
+                .read_events(&subject, None)
+                .await
+                .expect("Failed to read events");
+
+            while let Some(result) = event_stream.next().await {
+                println!("Cursor: {result:?}");
+                match result {
+                    Ok(event) => {
+                        if let Ok(serialized_event) = serialized_event(event) {
+                            if feed.push(Ok(serialized_event)).await.is_err() {
+                                println!("Could not push event to stream. Stopping event stream.");
+                                break;
+                            };
+                        } else {
+                            println!("Failed to map event to SerializedEvent");
+                        }
+                    }
+                    Err(e) => {
+                        println!("Error while streaming events: {:?}", e);
+                    }
+                }
+            }
+        });
+
+        Ok(stream)
     }
 
     async fn stream_all_events<A: Aggregate>(&self) -> Result<ReplayStream, PersistenceError> {
-        Err(PersistenceError::UnknownError(
-            "Not implemented: stream_all_events".into(),
-        ))
+        unimplemented!()
     }
 }
 
@@ -242,5 +268,36 @@ mod tests {
         println!("Events: {:#?}", events);
 
         assert_eq!(2, events.len());
+    }
+
+    #[tokio::test]
+    async fn test_event_repository_replay_stream_aggregate_instance() {
+        let client = esdb_client().await;
+        let repository = EventSourcingDbEventRepository::new(client).await.unwrap();
+        let aggregate_id = Alphabetic.sample_string(&mut rand::rng(), 16);
+
+        // Create 10 test events
+        let events: Vec<SerializedEvent> = (1..=10)
+            .map(|i| {
+                test_event(
+                    &aggregate_id,
+                    i,
+                    CustomerEvent::EmailUpdated {
+                        new_email: format!("{}@example.test", i),
+                    },
+                )
+            })
+            .collect();
+        repository.insert_events(&events).await.unwrap();
+
+        let mut stream = repository
+            .stream_events::<Customer>(&aggregate_id)
+            .await
+            .unwrap();
+        let mut num_events = 0;
+        while (stream.next::<Customer>(&None).await).is_some() {
+            num_events += 1;
+        }
+        assert_eq!(10, num_events);
     }
 }

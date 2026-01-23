@@ -2,9 +2,19 @@
 pub(crate) mod tests {
     use cqrs_es::doc::{Customer, CustomerEvent};
     use cqrs_es::persist::SerializedEvent;
-    use cqrs_es::{Aggregate, DomainEvent};
-    use eventsourcingdb::EventCandidate;
-    use serde_json::json;
+    use cqrs_es::{Aggregate, DomainEvent, EventEnvelope, View};
+    use serde::{Deserialize, Serialize};
+
+    #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+    pub(crate) struct CustomerView {
+        pub(crate) events: Vec<CustomerEvent>,
+    }
+
+    impl View<Customer> for CustomerView {
+        fn update(&mut self, event: &EventEnvelope<Customer>) {
+            self.events.push(event.payload.clone());
+        }
+    }
 
     pub(crate) fn test_event(id: &str, sequence: usize, event: CustomerEvent) -> SerializedEvent {
         let payload = serde_json::to_value(&event).unwrap();
