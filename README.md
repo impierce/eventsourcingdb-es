@@ -1,6 +1,7 @@
 # eventsourcingdb-es
 
 [![Crates.io Version](https://img.shields.io/crates/v/eventsourcingdb-es)](https://crates.io/crates/eventsourcingdb-es)
+[![codecov](https://codecov.io/gh/impierce/eventsourcingdb-es/graph/badge.svg?token=69OQPQVDM4)](https://codecov.io/gh/impierce/eventsourcingdb-es)
 
 An [EventSourcingDB](https://docs.eventsourcingdb.io) implementation of the `PersistedEventRepository` trait in [cqrs-es](https://crates.io/crates/cqrs-es).
 

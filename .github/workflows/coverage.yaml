@@ -8,7 +8,9 @@ jobs:
 
     services:
       eventsourcingdb:
-        image: thenativeweb/eventsourcingdb
+        image: thenativeweb/eventsourcingdb:1.2.0
+        ports:
+          - 3000:3000
         options: >-
           run
           --api-token=secret
