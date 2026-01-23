@@ -10,7 +10,13 @@ use eventsourcingdb::{Client, EventCandidate};
 use futures::StreamExt;
 use serde_json::{Value, json};
 
-use crate::{error::EventSourcingDbError, mappers::map_type_to_reverse_domain_name};
+use crate::{
+    error::EventSourcingDbError,
+    mappers::{
+        map_aggregate_type_and_id_to_subject, map_event_type_to_reverse_domain_name,
+        map_reverse_domain_name_to_type, map_subject_to_aggregate_type_and_id,
+    },
+};
 
 /// An event repository using EventSourcingDB for persistence.
 pub struct EventSourcingDbEventRepository {
@@ -41,7 +47,7 @@ impl EventSourcingDbEventRepository {
 
         let candidates: Vec<EventCandidate> = events
             .iter()
-            .map(|event| deserialized_event(event).unwrap())
+            .map(|event| esdb_event_candidate(event).unwrap())
             .collect();
 
         let result = self.client.write_events(candidates, vec![]).await?;
@@ -55,9 +61,10 @@ impl EventSourcingDbEventRepository {
         aggregate_id: &str,
         min_sequence: usize,
     ) -> Result<Vec<SerializedEvent>, EventSourcingDbError> {
+        let subject = map_aggregate_type_and_id_to_subject(aggregate_type, aggregate_id);
         let mut event_stream = self
             .client
-            .read_events(aggregate_id, None)
+            .read_events(&subject, None)
             .await
             .expect("Failed to read events");
         let mut events = vec![];
@@ -83,32 +90,36 @@ impl EventSourcingDbEventRepository {
 fn serialized_event(
     event: eventsourcingdb::Event,
 ) -> Result<SerializedEvent, eventsourcingdb::error::EventError> {
+    let (event_type, event_version) = map_reverse_domain_name_to_type(&event.ty());
+
+    let (aggregate_type, aggregate_id) = map_subject_to_aggregate_type_and_id(event.subject());
+
+    println!("{:#?}", event);
+
     Ok(SerializedEvent {
-        aggregate_id: event.subject().to_string(),
+        aggregate_id,
         sequence: event.id().parse().unwrap(),
-        aggregate_type: event.datacontenttype().to_string(),
-        event_type: event.ty().to_string(),
-        event_version: "TODO".to_string(),
+        aggregate_type,
+        event_type,
+        event_version,
         payload: event.data().clone(),
         metadata: json!({}),
     })
 }
 
 // Maps a SerializedEvent to an EventCandidate for EventSourcingDB
-fn deserialized_event(
+fn esdb_event_candidate(
     event: &SerializedEvent,
 ) -> Result<eventsourcingdb::EventCandidate, eventsourcingdb::error::EventError> {
-    let subject = if event.aggregate_id.starts_with('/') {
-        event.aggregate_id.clone()
-    } else {
-        format!("/{}", event.aggregate_id)
-    };
+    println!("{:#?}", event);
 
-    let ty = map_type_to_reverse_domain_name(&event.event_type);
+    let subject = map_aggregate_type_and_id_to_subject(&event.aggregate_type, &event.aggregate_id);
+
+    let ty = map_event_type_to_reverse_domain_name(&event.event_type, &event.event_version);
 
     Ok(eventsourcingdb::EventCandidate::builder()
         .data(event.payload.clone())
-        .source("https://example.org".to_string())
+        .source("tag:example.org,2026:esdb".to_string())
         .subject(subject)
         .ty(ty)
         .build())
@@ -195,7 +206,7 @@ mod tests {
     async fn test_event_repository_inserts_successfully() {
         let client = esdb_client().await;
         let repository = EventSourcingDbEventRepository::new(client).await.unwrap();
-        let aggregate_id = format!("/{}", Alphabetic.sample_string(&mut rand::rng(), 16));
+        let aggregate_id = Alphabetic.sample_string(&mut rand::rng(), 16);
         let events = repository
             .get_events::<Customer>(&aggregate_id)
             .await
@@ -204,13 +215,22 @@ mod tests {
 
         // Insert events
         repository
-            .insert_events(&[test_event(
-                &aggregate_id,
-                1,
-                CustomerEvent::NameAdded {
-                    name: "Ferris".to_string(),
-                },
-            )])
+            .insert_events(&[
+                test_event(
+                    &aggregate_id,
+                    1,
+                    CustomerEvent::NameAdded {
+                        name: "Ferris".to_string(),
+                    },
+                ),
+                test_event(
+                    &aggregate_id,
+                    2,
+                    CustomerEvent::EmailUpdated {
+                        new_email: "ferris@example.test".to_string(),
+                    },
+                ),
+            ])
             .await
             .unwrap();
 
@@ -219,6 +239,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(1, events.len());
+        println!("Events: {:#?}", events);
+
+        assert_eq!(2, events.len());
     }
 }
