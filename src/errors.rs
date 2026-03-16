@@ -12,7 +12,7 @@ pub enum EventSourcingDbError {
     InvalidSubject(String),
     #[error("invalid sequence number: {0}")]
     InvalidSequence(#[from] std::num::ParseIntError),
-    //TODO: this can be unmangled/ matched
+    //TODO: this can be unmangled/ matched, especially OptimisticLocking and serde
     #[error("{0}")]
     ClientError(#[from] ClientError),
 }

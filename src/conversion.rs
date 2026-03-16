@@ -4,8 +4,11 @@ use chrono::{DateTime, Utc};
 use cqrs_es::persist::SerializedEvent;
 use eventsourcingdb::{Event, TraceInfo};
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 
 use crate::errors::{EventSourcingDbError, EventSourcingDbResult};
+
+pub const STORED_EVENT_ENVELOPE_MARKER: &str = "eventsourcingdb-es@1";
 
 fn to_pascal_case(s: &str) -> String {
     s.split('-')
@@ -60,6 +63,14 @@ pub(crate) fn map_subject_to_aggregate_type_and_id(
 pub struct ReversedDomain(Vec<String>);
 
 impl ReversedDomain {
+    pub fn new<I, S>(labels: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        Self(labels.into_iter().map(Into::into).collect())
+    }
+
     pub fn labels(&self) -> &[String] {
         &self.0
     }
@@ -142,18 +153,139 @@ impl From<&Event> for EventMetadata {
     }
 }
 
-pub fn map_event(event: Event) -> EventSourcingDbResult<SerializedEvent> {
+pub fn qualify_event_type(
+    domain: &ReversedDomain,
+    event_type: &str,
+    event_version: &str,
+) -> String {
+    let mut parts: Vec<String> = domain.labels().to_vec();
+    parts.push(pascal_to_kebab_case(event_type));
+
+    if event_version != "1" {
+        parts.push(format!("v{event_version}"));
+    }
+
+    parts.join(".")
+}
+
+pub fn wrap_event_data(payload: Value, metadata: Value) -> Value {
+    json!({
+        "_cqrs_es": STORED_EVENT_ENVELOPE_MARKER,
+        "payload": payload,
+        "metadata": metadata,
+    })
+}
+
+pub fn unwrap_event_data(data: &Value) -> (Value, Value) {
+    let Some(object) = data.as_object() else {
+        return (data.clone(), json!({}));
+    };
+
+    let is_wrapped = object
+        .get("_cqrs_es")
+        .and_then(Value::as_str)
+        .map(|marker| marker == STORED_EVENT_ENVELOPE_MARKER)
+        .unwrap_or(false);
+
+    if !is_wrapped {
+        return (data.clone(), json!({}));
+    }
+
+    let payload = object.get("payload").cloned().unwrap_or(Value::Null);
+    let metadata = object.get("metadata").cloned().unwrap_or_else(|| json!({}));
+
+    (payload, metadata)
+}
+
+pub fn map_event(
+    event: Event,
+    sequence: usize,
+) -> EventSourcingDbResult<(SerializedEvent, EventMetadata)> {
     let event_type: QualifiedEventType = event.ty().parse()?;
     let (aggregate_type, aggregate_id) = map_subject_to_aggregate_type_and_id(event.subject())?;
+    let (payload, metadata) = unwrap_event_data(event.data());
     let meta = EventMetadata::from(&event);
-    Ok(SerializedEvent {
-        aggregate_id: aggregate_id,
-        sequence: event.id().parse()?,
+    let serialized = SerializedEvent {
+        aggregate_id,
+        sequence,
         aggregate_type,
-        event_type: event_type.event_type,
+        event_type: to_pascal_case(&event_type.event_type),
         // a non-existing version defaults to 1
         event_version: event_type.event_version.unwrap_or(1 as usize).to_string(),
-        payload: event.data().clone(),
-        metadata: serde_json::to_value(&meta)?,
-    })
+        payload,
+        metadata,
+    };
+
+    Ok((serialized, meta))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn sample_event(data: Value) -> Event {
+        serde_json::from_value(json!({
+            "data": data,
+            "datacontenttype": "application/json",
+            "hash": "hash",
+            "id": "01JXYZOPAQUEID",
+            "predecessorhash": "predecessor",
+            "source": "urn:test",
+            "specversion": "1.0",
+            "subject": "/BookAggregate/42",
+            "time": "2026-03-17T10:00:00Z",
+            "type": "io.eventsourcingdb.book-created.v2",
+            "signature": null
+        }))
+        .expect("event JSON should deserialize")
+    }
+
+    #[test]
+    fn qualify_event_type_uses_domain_and_kebab_case() {
+        let domain = ReversedDomain::new(["io", "eventsourcingdb"]);
+        let qualified = qualify_event_type(&domain, "BookCreated", "2");
+
+        assert_eq!(qualified, "io.eventsourcingdb.book-created.v2");
+    }
+
+    #[test]
+    fn wrap_and_unwrap_event_data_round_trip_payload_and_metadata() {
+        let payload = json!({ "title": "DDD" });
+        let metadata = json!({ "request_id": "abc-123" });
+
+        let wrapped = wrap_event_data(payload.clone(), metadata.clone());
+        let (actual_payload, actual_metadata) = unwrap_event_data(&wrapped);
+
+        assert_eq!(actual_payload, payload);
+        assert_eq!(actual_metadata, metadata);
+    }
+
+    #[test]
+    fn unwrap_raw_event_data_keeps_payload_and_defaults_metadata() {
+        let raw_payload = json!({ "title": "DDD" });
+        let (payload, metadata) = unwrap_event_data(&raw_payload);
+
+        assert_eq!(payload, raw_payload);
+        assert_eq!(metadata, json!({}));
+    }
+
+    #[test]
+    fn map_event_uses_logical_sequence_not_opaque_event_id() {
+        let event = sample_event(wrap_event_data(
+            json!({ "title": "DDD" }),
+            json!({ "request_id": "abc-123" }),
+        ));
+
+        let (serialized, meta) = map_event(event, 7).expect("event should map");
+
+        assert_eq!(serialized.sequence, 7);
+        assert_eq!(serialized.aggregate_id, "42");
+        assert_eq!(serialized.aggregate_type, "BookAggregate");
+        assert_eq!(serialized.event_type, "BookCreated");
+        assert_eq!(serialized.event_version, "2");
+        assert_eq!(serialized.payload, json!({ "title": "DDD" }));
+        assert_eq!(serialized.metadata, json!({ "request_id": "abc-123" }));
+        assert_eq!(meta.subject, "/BookAggregate/42");
+    }
 }
