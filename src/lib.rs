@@ -1,3 +1,8 @@
+pub mod conversion;
+pub mod errors;
+pub mod event_repository;
+pub mod types;
+
 pub fn add(left: u64, right: u64) -> u64 {
     left + right
 }
