@@ -17,6 +17,10 @@ This adapter follows the naming guidance from the [EventSourcingDB documentation
 - Legacy unversioned event types are still read as version `1.0`, but new writes always use an explicit `.v1` suffix.
 - Event payload and metadata are stored in an adapter envelope so `cqrs-es` metadata survives round-trips.
 
+## Mapping EventSourcingDB ids to `cqrs-es` sequences
+
+`cqrs-es` expects each aggregate stream to have a continuous sequence `1, 2, 3, ...`, while EventSourcingDB ids are global chronological integers encoded as strings for CloudEvents compatibility. This adapter remaps the global id stream to per-aggregate logical sequence numbers, uses the last EventSourcingDB id as the optimistic-write precondition, and stores that id in snapshots so loading after a snapshot can continue from the correct global boundary.
+
 ## Usage
 
 Add the following to your `Cargo.toml`:

@@ -38,7 +38,7 @@ fn pascal_to_kebab_case(s: &str) -> String {
 }
 
 // we assume that the subject always has the shape /aggregate_type/aggregate_id
-// e.g. /books/42
+// e.g. /books/42, everything else will be rejected
 pub(crate) fn map_subject_to_aggregate_type_and_id(
     subject: &str,
 ) -> Result<(String, String), EventSourcingDbError> {
@@ -59,6 +59,10 @@ pub(crate) fn map_subject_to_aggregate_type_and_id(
     Ok((aggregate_type.to_string(), aggregate_id.to_string()))
 }
 
+/// Reverse-domain prefix used when building persisted EventSourcingDB event types.
+/// For example, `ReversedDomain::new(["com", "flangator", "banking"])` makes the
+/// CQRS event `CustomerDepositedMoney` version `1.0` persist as
+/// `com.flangator.banking.customer-deposited-money.v1`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ReversedDomain(Vec<String>);
 
@@ -76,6 +80,9 @@ impl ReversedDomain {
     }
 }
 
+/// The fully qualified event name follows EventSourcingDB [convention](https://docs.eventsourcingdb.io/fundamentals/event-types/#required-field)
+/// and wrapts the reversed domain,the actual type as presented to cqrs-es and an optional version.
+/// The absence of a version will be treated as 1.0.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct QualifiedEventType {
     pub reversed_domain: ReversedDomain,
@@ -192,6 +199,9 @@ pub fn qualify_event_type(
     Ok(parts.join("."))
 }
 
+/// Since both metadata and data of the cqrs-es event needs to be persisted in the
+/// `data` field of [`Event`], a JSON object with a special tag [`STORED_EVENT_ENVELOPE_MARKER`]
+/// and two fields is created.
 pub fn wrap_event_data(payload: Value, metadata: Value) -> Value {
     json!({
         "_cqrs_es": STORED_EVENT_ENVELOPE_MARKER,

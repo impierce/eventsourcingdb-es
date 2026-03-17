@@ -24,7 +24,7 @@ use crate::{
 const SNAPSHOT_EVENT_TYPE: &str = "io.eventsourcingdb.cqrs-es.snapshot-record.v1";
 const SNAPSHOT_EVENT_SOURCE: &str = "urn:eventsourcingdb-es:snapshot";
 const EVENT_SOURCE: &str = "urn:eventsourcingdb-es:event";
-//TODO: make part of struct
+//TODO: make part of struct?
 const STREAM_CHANNEL_SIZE: usize = 2048;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -32,17 +32,26 @@ struct EventSourcingDbSnapshotRecord {
     aggregate_type: String,
     aggregate_id: String,
     aggregate: Value,
+    // cqrs-es event sequence
     current_sequence: usize,
     current_snapshot: usize,
+    // EventSourcingDb's event id
     last_event_id: Option<String>,
 }
 
+// Required to map betwen EventSourcingDBs internal ids and the continous sequence assumed
+// by cqrs-es.
 #[derive(Debug, Clone)]
 struct SubjectState {
     logical_sequence_count: usize,
     last_event_id: Option<String>,
 }
 
+/// `cqrs-es` expects per-aggregate events to have a continuous logical sequence `1, 2, 3, ...`,
+/// while EventSourcingDB ids are global chronological integers encoded as strings for
+/// CloudEvents compatibility. This adapter remaps those global ids to per-aggregate sequences,
+/// uses the last stored EventSourcingDB id as the optimistic-write precondition, and stores that
+/// id in snapshots so tail reads can resume at the right global boundary.
 pub struct EventSourcingDbEventRepository {
     client: Arc<Client>,
     domain: ReversedDomain,
