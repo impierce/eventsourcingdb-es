@@ -229,7 +229,7 @@ mod tests {
             "data": data,
             "datacontenttype": "application/json",
             "hash": "hash",
-            "id": "01JXYZOPAQUEID",
+            "id": "1",
             "predecessorhash": "predecessor",
             "source": "urn:test",
             "specversion": "1.0",

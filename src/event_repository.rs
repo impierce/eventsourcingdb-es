@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::HashMap, sync::Arc};
 
 use cqrs_es::{
     Aggregate,
@@ -11,7 +11,7 @@ use eventsourcingdb::{
     Client, Event, EventCandidate, Precondition,
     request_options::{Bound, BoundType, Ordering, ReadEventsOptions},
 };
-use futures::TryStreamExt;
+use futures::{StreamExt, TryStreamExt};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -20,9 +20,12 @@ use crate::{
     errors::{EventSourcingDbError, EventSourcingDbResult},
 };
 
+//TODO: maybe not the best idea to hardcode that
 const SNAPSHOT_EVENT_TYPE: &str = "io.eventsourcingdb.cqrs-es.snapshot-record.v1";
 const SNAPSHOT_EVENT_SOURCE: &str = "urn:eventsourcingdb-es:snapshot";
 const EVENT_SOURCE: &str = "urn:eventsourcingdb-es:event";
+//TODO: make part of struct
+const STREAM_CHANNEL_SIZE: usize = 2048;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct EventSourcingDbSnapshotRecord {
@@ -56,6 +59,41 @@ impl EventSourcingDbEventRepository {
 
     fn get_snapshot_subject<A: Aggregate>(id: &str) -> String {
         format!("/__snapshots__/{}/{}", &A::TYPE, id)
+    }
+
+    // We enforce the convention /aggregate_type/aggregate_id hard. Every deviation is
+    // treated as error.
+    fn aggregate_id_from_subject(subject: &str) -> EventSourcingDbResult<String> {
+        let mut segments = subject.split('/').filter(|segment| !segment.is_empty());
+        let aggregate_type = segments
+            .next()
+            .ok_or_else(|| EventSourcingDbError::InvalidSubject(subject.to_string()))?;
+        let aggregate_id = segments
+            .next()
+            .ok_or_else(|| EventSourcingDbError::InvalidSubject(subject.to_string()))?;
+
+        if segments.next().is_some() {
+            return Err(EventSourcingDbError::InvalidSubject(subject.to_string()));
+        }
+
+        if aggregate_type.is_empty() || aggregate_id.is_empty() {
+            return Err(EventSourcingDbError::InvalidSubject(subject.to_string()));
+        }
+
+        Ok(aggregate_id.to_string())
+    }
+
+    fn serialize_stream_event(
+        event: Event,
+        sequence: usize,
+    ) -> Result<SerializedEvent, PersistenceError> {
+        map_event(event, sequence)
+            .map(|(serialized, _)| serialized)
+            .map_err(Into::into)
+    }
+
+    fn stream_client_error(err: eventsourcingdb::error::ClientError) -> PersistenceError {
+        EventSourcingDbError::ClientError(err).into()
     }
 
     async fn read_subject_events<A: Aggregate>(
@@ -128,12 +166,12 @@ impl EventSourcingDbEventRepository {
             )
             .await?;
 
-        let Some(event) = stream.try_next().await? else {
-            return Ok(None);
-        };
-
-        let record = serde_json::from_value(event.data().clone())?;
-        Ok(Some(record))
+        let record: Option<EventSourcingDbSnapshotRecord> = stream
+            .try_next()
+            .await?
+            .map(|event| serde_json::from_value(event.data().clone()))
+            .transpose()?;
+        Ok(record)
     }
 
     async fn read_events_since_snapshot<A: Aggregate>(
@@ -165,6 +203,7 @@ impl EventSourcingDbEventRepository {
         &self,
         aggregate_id: &str,
     ) -> EventSourcingDbResult<SubjectState> {
+        //TODO: use a clever eventql query here instead of reading the complete stream
         let events =
             Self::read_subject_events::<A>(Arc::clone(&self.client), aggregate_id.to_string())
                 .await?;
@@ -299,6 +338,7 @@ impl PersistedEventRepository for EventSourcingDbEventRepository {
             Ok(events) => events,
             Err(err) => {
                 return Err(match err {
+                    //TODO: make part of error conversion
                     eventsourcingdb::error::ClientError::DBApiError(status, _)
                         if matches!(status.as_u16(), 409 | 412) =>
                     {
@@ -329,21 +369,114 @@ impl PersistedEventRepository for EventSourcingDbEventRepository {
 
     async fn stream_events<A: cqrs_es::Aggregate>(
         &self,
-        _aggregate_id: &str,
+        aggregate_id: &str,
     ) -> Result<ReplayStream, PersistenceError> {
-        todo!()
+        let client = Arc::clone(&self.client);
+        let subject = Self::get_subject::<A>(&aggregate_id);
+        let (mut feed, stream) = ReplayStream::new(STREAM_CHANNEL_SIZE);
+
+        tokio::spawn(async move {
+            let mut event_stream = match client
+                .read_events(
+                    &subject,
+                    Some(ReadEventsOptions {
+                        order: Some(Ordering::Chronological),
+                        ..Default::default()
+                    }),
+                )
+                .await
+            {
+                Ok(stream) => stream,
+                Err(err) => {
+                    let _ = feed.push(Err(Self::stream_client_error(err))).await;
+                    return;
+                }
+            };
+            let mut sequence = 0usize;
+
+            while let Some(result) = event_stream.next().await {
+                let mapped = match result {
+                    Ok(event) => {
+                        sequence += 1;
+                        Self::serialize_stream_event(event, sequence)
+                    }
+                    Err(err) => Err(Self::stream_client_error(err)),
+                };
+
+                if feed.push(mapped).await.is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(stream)
     }
 
     async fn stream_all_events<A: cqrs_es::Aggregate>(
         &self,
     ) -> Result<ReplayStream, PersistenceError> {
-        todo!()
+        let client = Arc::clone(&self.client);
+
+        // query all aggregates of this type using the root aggregate subject.
+        let subject = format!("/{}", A::TYPE);
+
+        let (mut feed, stream) = ReplayStream::new(STREAM_CHANNEL_SIZE);
+
+        tokio::spawn(async move {
+            let mut event_stream = match client
+                .read_events(
+                    &subject,
+                    Some(ReadEventsOptions {
+                        recursive: true,
+                        order: Some(Ordering::Chronological),
+                        ..Default::default()
+                    }),
+                )
+                .await
+            {
+                Ok(stream) => stream,
+                Err(err) => {
+                    let _ = feed.push(Err(Self::stream_client_error(err))).await;
+                    return;
+                }
+            };
+
+            let mut sequences: HashMap<String, usize> = HashMap::new();
+
+            while let Some(result) = event_stream.next().await {
+                let mapped = match result {
+                    Ok(event) => {
+                        let sequence = match Self::aggregate_id_from_subject(event.subject()) {
+                            Ok(aggregate_id) => {
+                                let next_sequence = sequences.entry(aggregate_id).or_insert(0);
+                                *next_sequence += 1;
+                                *next_sequence
+                            }
+                            Err(err) => {
+                                if feed.push(Err(err.into())).await.is_err() {
+                                    break;
+                                }
+                                continue;
+                            }
+                        };
+
+                        Self::serialize_stream_event(event, sequence)
+                    }
+                    Err(err) => Err(Self::stream_client_error(err)),
+                };
+
+                if feed.push(mapped).await.is_err() {
+                    break;
+                }
+            }
+        });
+        Ok(stream)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cqrs_es::persist::PersistenceError;
     use serde_json::json;
 
     fn sample_event(id: &str, event_type: &str, payload: Value) -> Event {
@@ -368,17 +501,17 @@ mod tests {
         let domain = ReversedDomain::new(["io", "eventsourcingdb"]);
         let events = vec![
             sample_event(
-                "01JAAA",
+                "1",
                 "io.eventsourcingdb.book-created",
                 wrap_event_data(json!({ "number": 1 }), json!({})),
             ),
             sample_event(
-                "01JAAB",
+                "2",
                 "io.eventsourcingdb.book-updated",
                 wrap_event_data(json!({ "number": 2 }), json!({})),
             ),
             sample_event(
-                "01JAAC",
+                "3",
                 "io.eventsourcingdb.book-updated",
                 wrap_event_data(json!({ "number": 3 }), json!({})),
             ),
@@ -392,5 +525,58 @@ mod tests {
         assert_eq!(serialized[0].payload, json!({ "number": 2 }));
         assert_eq!(serialized[1].sequence, 3);
         assert_eq!(serialized[1].payload, json!({ "number": 3 }));
+    }
+
+    #[test]
+    fn aggregate_id_from_subject_requires_exact_aggregate_subject() {
+        let aggregate_id =
+            EventSourcingDbEventRepository::aggregate_id_from_subject("/BookAggregate/42")
+                .expect("subject should parse");
+
+        assert_eq!(aggregate_id, "42");
+        assert!(matches!(
+            EventSourcingDbEventRepository::aggregate_id_from_subject("/BookAggregate/42/chapter"),
+            Err(EventSourcingDbError::InvalidSubject(_))
+        ));
+    }
+
+    #[test]
+    fn serialize_stream_event_preserves_supplied_sequence() {
+        let event = sample_event(
+            "1",
+            "io.eventsourcingdb.book-created.v2",
+            wrap_event_data(json!({ "number": 1 }), json!({ "request_id": "abc" })),
+        );
+
+        let serialized = EventSourcingDbEventRepository::serialize_stream_event(event, 5)
+            .expect("event should serialize");
+
+        assert_eq!(serialized.sequence, 5);
+        assert_eq!(serialized.aggregate_id, "42");
+        assert_eq!(serialized.event_type, "BookCreated");
+        assert_eq!(serialized.event_version, "2");
+    }
+
+    #[test]
+    fn serialize_stream_event_converts_mapping_failures_to_persistence_errors() {
+        let invalid_event: Event = serde_json::from_value(json!({
+            "data": json!({}),
+            "datacontenttype": "application/json",
+            "hash": "hash",
+            "id": "1",
+            "predecessorhash": "predecessor",
+            "source": "urn:test",
+            "specversion": "1.0",
+            "subject": "/BookAggregate/42",
+            "time": "2026-03-17T10:00:00Z",
+            "type": "invalid",
+            "signature": null
+        }))
+        .expect("event JSON should deserialize");
+
+        let err = EventSourcingDbEventRepository::serialize_stream_event(invalid_event, 1)
+            .expect_err("invalid event type should fail");
+
+        assert!(matches!(err, PersistenceError::UnknownError(_)));
     }
 }
