@@ -93,7 +93,7 @@ impl EventSourcingDbEventRepository {
     }
 
     fn stream_client_error(err: eventsourcingdb::error::ClientError) -> PersistenceError {
-        EventSourcingDbError::ClientError(err).into()
+        EventSourcingDbError::from(err).into()
     }
 
     async fn read_subject_events<A: Aggregate>(
@@ -220,14 +220,12 @@ impl EventSourcingDbEventRepository {
         &self,
         event: &SerializedEvent,
     ) -> EventSourcingDbResult<EventCandidate> {
+        let event_type = qualify_event_type(&self.domain, &event.event_type, &event.event_version)?;
+
         Ok(EventCandidate::builder()
             .source(EVENT_SOURCE.to_string())
             .subject(Self::get_subject::<A>(&event.aggregate_id))
-            .ty(qualify_event_type(
-                &self.domain,
-                &event.event_type,
-                &event.event_version,
-            ))
+            .ty(event_type)
             .data(wrap_event_data(
                 event.payload.clone(),
                 event.metadata.clone(),
@@ -336,17 +334,7 @@ impl PersistedEventRepository for EventSourcingDbEventRepository {
             .await
         {
             Ok(events) => events,
-            Err(err) => {
-                return Err(match err {
-                    //TODO: make part of error conversion
-                    eventsourcingdb::error::ClientError::DBApiError(status, _)
-                        if matches!(status.as_u16(), 409 | 412) =>
-                    {
-                        PersistenceError::OptimisticLockError
-                    }
-                    other => PersistenceError::from(EventSourcingDbError::ClientError(other)),
-                });
-            }
+            Err(err) => return Err(PersistenceError::from(EventSourcingDbError::from(err))),
         };
 
         if let Some((snapshot_aggregate_id, aggregate, current_snapshot)) = snapshot_update {
@@ -554,7 +542,7 @@ mod tests {
         assert_eq!(serialized.sequence, 5);
         assert_eq!(serialized.aggregate_id, "42");
         assert_eq!(serialized.event_type, "BookCreated");
-        assert_eq!(serialized.event_version, "2");
+        assert_eq!(serialized.event_version, "2.0");
     }
 
     #[test]

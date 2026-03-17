@@ -9,6 +9,7 @@ license = "Apache-2.0"
 keywords = ["cqrs", "event-sourcing", "eventsourcingdb", "cqrs-es"]
 
 [dependencies]
+async-trait = "0.1.89"
 chrono = { version = "0.4.44", features = ["serde"] }
 cqrs-es = "0.5.0"
 eventsourcingdb = "2.0.1"
@@ -17,3 +18,4 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 thiserror = "2.0.18"
 tokio = "1.50.0"
+url = "2.5.8"

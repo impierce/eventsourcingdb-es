@@ -83,6 +83,32 @@ pub struct QualifiedEventType {
     pub event_version: Option<usize>,
 }
 
+fn parse_major_version_str(value: &str) -> Result<usize, EventSourcingDbError> {
+    if let Some((major, minor)) = value.split_once('.') {
+        if minor != "0" {
+            return Err(EventSourcingDbError::InvalidEventVersion(value.into()));
+        }
+
+        let major: usize = major.parse()?;
+        if major == 0 {
+            return Err(EventSourcingDbError::InvalidEventVersion(value.into()));
+        }
+
+        return Ok(major);
+    }
+
+    let major: usize = value.parse()?;
+    if major == 0 {
+        return Err(EventSourcingDbError::InvalidEventVersion(value.into()));
+    }
+
+    Ok(major)
+}
+
+fn format_cqrs_event_version(major: usize) -> String {
+    format!("{major}.0")
+}
+
 impl FromStr for QualifiedEventType {
     type Err = EventSourcingDbError;
 
@@ -157,15 +183,13 @@ pub fn qualify_event_type(
     domain: &ReversedDomain,
     event_type: &str,
     event_version: &str,
-) -> String {
+) -> EventSourcingDbResult<String> {
+    let major = parse_major_version_str(event_version)?;
     let mut parts: Vec<String> = domain.labels().to_vec();
     parts.push(pascal_to_kebab_case(event_type));
+    parts.push(format!("v{major}"));
 
-    if event_version != "1" {
-        parts.push(format!("v{event_version}"));
-    }
-
-    parts.join(".")
+    Ok(parts.join("."))
 }
 
 pub fn wrap_event_data(payload: Value, metadata: Value) -> Value {
@@ -210,8 +234,8 @@ pub fn map_event(
         sequence,
         aggregate_type,
         event_type: to_pascal_case(&event_type.event_type),
-        // a non-existing version defaults to 1
-        event_version: event_type.event_version.unwrap_or(1 as usize).to_string(),
+        // a non-existing version defaults to legacy v1.
+        event_version: format_cqrs_event_version(event_type.event_version.unwrap_or(1)),
         payload,
         metadata,
     };
@@ -244,9 +268,45 @@ mod tests {
     #[test]
     fn qualify_event_type_uses_domain_and_kebab_case() {
         let domain = ReversedDomain::new(["io", "eventsourcingdb"]);
-        let qualified = qualify_event_type(&domain, "BookCreated", "2");
+        let qualified = qualify_event_type(&domain, "BookCreated", "2.0").unwrap();
 
         assert_eq!(qualified, "io.eventsourcingdb.book-created.v2");
+    }
+
+    #[test]
+    fn qualify_event_type_normalizes_v1_and_major_only_versions() {
+        let domain = ReversedDomain::new(["io", "eventsourcingdb"]);
+
+        assert_eq!(
+            qualify_event_type(&domain, "BookCreated", "1").unwrap(),
+            "io.eventsourcingdb.book-created.v1"
+        );
+        assert_eq!(
+            qualify_event_type(&domain, "BookCreated", "1.0").unwrap(),
+            "io.eventsourcingdb.book-created.v1"
+        );
+        assert_eq!(
+            qualify_event_type(&domain, "BookCreated", "2").unwrap(),
+            "io.eventsourcingdb.book-created.v2"
+        );
+    }
+
+    #[test]
+    fn qualify_event_type_rejects_non_major_versions() {
+        let domain = ReversedDomain::new(["io", "eventsourcingdb"]);
+
+        assert!(matches!(
+            qualify_event_type(&domain, "BookCreated", "0"),
+            Err(EventSourcingDbError::InvalidEventVersion(_))
+        ));
+        assert!(matches!(
+            qualify_event_type(&domain, "BookCreated", "1.1"),
+            Err(EventSourcingDbError::InvalidEventVersion(_))
+        ));
+        assert!(matches!(
+            qualify_event_type(&domain, "BookCreated", "1.2.3"),
+            Err(EventSourcingDbError::InvalidEventVersion(_))
+        ));
     }
 
     #[test]
@@ -283,9 +343,32 @@ mod tests {
         assert_eq!(serialized.aggregate_id, "42");
         assert_eq!(serialized.aggregate_type, "BookAggregate");
         assert_eq!(serialized.event_type, "BookCreated");
-        assert_eq!(serialized.event_version, "2");
+        assert_eq!(serialized.event_version, "2.0");
         assert_eq!(serialized.payload, json!({ "title": "DDD" }));
         assert_eq!(serialized.metadata, json!({ "request_id": "abc-123" }));
         assert_eq!(meta.subject, "/BookAggregate/42");
+    }
+
+    #[test]
+    fn map_event_treats_legacy_unversioned_event_type_as_v1() {
+        let event: Event = serde_json::from_value(json!({
+            "data": wrap_event_data(json!({ "title": "DDD" }), json!({})),
+            "datacontenttype": "application/json",
+            "hash": "hash",
+            "id": "1",
+            "predecessorhash": "predecessor",
+            "source": "urn:test",
+            "specversion": "1.0",
+            "subject": "/BookAggregate/42",
+            "time": "2026-03-17T10:00:00Z",
+            "type": "io.eventsourcingdb.book-created",
+            "signature": null
+        }))
+        .expect("event JSON should deserialize");
+
+        let (serialized, _) = map_event(event, 1).expect("legacy event should map");
+
+        assert_eq!(serialized.event_type, "BookCreated");
+        assert_eq!(serialized.event_version, "1.0");
     }
 }
