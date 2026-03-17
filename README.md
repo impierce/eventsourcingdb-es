@@ -30,3 +30,13 @@ Add the following to your `Cargo.toml`:
 cqrs-es = "0.5"
 eventsourcingdb-es = "0.1.0"
 ```
+
+## Features implemented
+
+- [x] Persist events
+- [x] Read events by subject (aggregate type and ID)
+- [x] Read last events by subject
+- [x] Stream events for subject
+- [x] Stream all events for aggregate type
+- [x] Write snapshots
+- [x] Read snapshots
