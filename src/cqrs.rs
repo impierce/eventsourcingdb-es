@@ -1,7 +1,3 @@
-use cqrs_es::{Aggregate, CqrsFramework, Query, persist::PersistedEventStore};
-
-use crate::{EventSourcingDbCqrs, EventSourcingDbEventRepository};
-
 pub async fn default_client(base_url: url::Url, api_token: String) -> eventsourcingdb::Client {
     eventsourcingdb::Client::new(base_url, api_token)
 }

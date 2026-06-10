@@ -1,6 +1,6 @@
+use std::future::Future;
 use std::sync::Arc;
 
-use async_trait::async_trait;
 use cqrs_es::{
     Aggregate, View,
     persist::{PersistenceError, ViewContext, ViewRepository},
@@ -21,28 +21,55 @@ impl<V, A> Default for InMemoryViewRepository<V, A> {
     }
 }
 
-#[async_trait]
-impl<V, A> ViewRepository<V, A> for InMemoryViewRepository<V, A>
+impl<V, A> InMemoryViewRepository<V, A>
 where
-    V: View<A> + Clone + Send + Sync,
+    V: View<A>,
     A: Aggregate,
 {
-    async fn load(&self, view_id: &str) -> Result<Option<V>, PersistenceError> {
-        Ok(self.views.get(view_id).map(|v| v.0.clone()))
+    pub fn new(_view_name: &str) -> Self {
+        Self {
+            _phantom: Default::default(),
+            views: Arc::new(DashMap::new()),
+        }
     }
+}
 
-    async fn load_with_context(
+impl<V, A> ViewRepository<V, A> for InMemoryViewRepository<V, A>
+where
+    V: View<A> + Clone,
+    A: Aggregate,
+{
+    fn load(
         &self,
         view_id: &str,
-    ) -> Result<Option<(V, ViewContext)>, PersistenceError> {
-        // Ok(self.views.get(view_id).map(|v| v.value().clone()))
-        unimplemented!()
+    ) -> impl Future<Output = Result<Option<V>, PersistenceError>> + Send {
+        async move { Ok(self.views.get(view_id).map(|v| v.0.clone())) }
     }
 
-    async fn update_view(&self, view: V, context: ViewContext) -> Result<(), PersistenceError> {
-        let view_id = context.view_instance_id.clone();
-        self.views.insert(view_id, (view, context));
-        Ok(())
+    fn load_with_context(
+        &self,
+        view_id: &str,
+    ) -> impl Future<Output = Result<Option<(V, ViewContext)>, PersistenceError>> + Send {
+        async move {
+            Ok(self.views.get(view_id).map(|v| {
+                (
+                    v.0.clone(),
+                    ViewContext::new(v.1.view_instance_id.clone(), v.1.version),
+                )
+            }))
+        }
+    }
+
+    fn update_view(
+        &self,
+        view: V,
+        context: ViewContext,
+    ) -> impl Future<Output = Result<(), PersistenceError>> + Send {
+        async move {
+            let view_id = context.view_instance_id.clone();
+            self.views.insert(view_id, (view, context));
+            Ok(())
+        }
     }
 }
 
@@ -74,5 +101,84 @@ mod tests {
         let loaded = repository.load(test_view_id).await.unwrap().unwrap();
 
         assert_eq!(loaded, view);
+    }
+
+    #[tokio::test]
+    async fn test_view_repository_load_missing_returns_none() {
+        let repository = InMemoryViewRepository::<CustomerView, Customer>::default();
+
+        let loaded = repository.load("missing").await.unwrap();
+        assert!(loaded.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_view_repository_load_with_context_roundtrip() {
+        let repository = InMemoryViewRepository::<CustomerView, Customer>::new("customer_view");
+        let view_id = "ctx-1";
+
+        let view = CustomerView {
+            events: vec![CustomerEvent::EmailUpdated {
+                new_email: "ferris@example.test".to_string(),
+            }],
+        };
+
+        repository
+            .update_view(view.clone(), ViewContext::new(view_id.to_string(), 7))
+            .await
+            .unwrap();
+
+        let loaded = repository
+            .load_with_context(view_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(loaded.0, view);
+        assert_eq!(loaded.1.view_instance_id, view_id.to_string());
+        assert_eq!(loaded.1.version, 7);
+    }
+
+    #[tokio::test]
+    async fn test_view_repository_load_with_context_missing_returns_none() {
+        let repository = InMemoryViewRepository::<CustomerView, Customer>::default();
+
+        let loaded = repository.load_with_context("missing").await.unwrap();
+        assert!(loaded.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_view_repository_update_view_overwrites_existing_entry() {
+        let repository = InMemoryViewRepository::<CustomerView, Customer>::default();
+        let view_id = "replace-1";
+
+        let first = CustomerView {
+            events: vec![CustomerEvent::NameAdded {
+                name: "Ferris".to_string(),
+            }],
+        };
+
+        let second = CustomerView {
+            events: vec![CustomerEvent::EmailUpdated {
+                new_email: "updated@example.test".to_string(),
+            }],
+        };
+
+        repository
+            .update_view(first, ViewContext::new(view_id.to_string(), 0))
+            .await
+            .unwrap();
+
+        repository
+            .update_view(second.clone(), ViewContext::new(view_id.to_string(), 1))
+            .await
+            .unwrap();
+
+        let loaded = repository
+            .load_with_context(view_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(loaded.0, second);
+        assert_eq!(loaded.1.version, 1);
     }
 }

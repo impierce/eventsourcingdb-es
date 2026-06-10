@@ -9,16 +9,15 @@ license = "Apache-2.0"
 keywords = ["cqrs", "event-sourcing", "eventsourcingdb", "cqrs-es"]
 
 [dependencies]
-async-trait = "0.1"
-cqrs-es = "0.4.12"
-dashmap = "6.1"
+cqrs-es = "0.5.0"
+dashmap = "6.2"
 eventsourcingdb = "1.1.0"
 futures = "0.3"
 regex = "1.12"
 serde_json = "1.0"
-tokio = { version = "1.49" }
+tokio = "1.52"
 url = "2.5"
 
 [dev-dependencies]
-rand = "0.9"
+rand = "0.10"
 serde = "1.0"

@@ -22,7 +22,7 @@ pub(crate) mod tests {
         SerializedEvent {
             aggregate_id: id.to_string(),
             sequence,
-            aggregate_type: Customer::aggregate_type().to_string(),
+            aggregate_type: Customer::TYPE.to_string(),
             event_type: event.event_type().to_string(),
             event_version: "1".to_string(),
             payload,

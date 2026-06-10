@@ -13,7 +13,7 @@ Add the following to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-cqrs-es = "0.4.12"
+cqrs-es = "0.5.0"
 eventsourcingdb-es = "0.1.0"
 ```
 
@@ -23,8 +23,8 @@ eventsourcingdb-es = "0.1.0"
 
 - [x] Persist events
 - [x] Read events by subject (aggregate type and ID)
-- [ ] Read last events by subject
+- [x] Read last events by subject
 - [x] Stream events for subject
-- [ ] Stream all events for aggregate type
+- [x] Stream all events for aggregate type
 - [ ] Write snapshots
 - [ ] Read snapshots

@@ -1,3 +1,4 @@
+pub use crate::cqrs::*;
 pub use crate::event_repository::*;
 pub use crate::types::*;
 pub use crate::view_repository::*;
