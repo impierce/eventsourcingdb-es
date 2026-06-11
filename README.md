@@ -14,7 +14,7 @@ Add the following to your `Cargo.toml`:
 ```toml
 [dependencies]
 cqrs-es = "0.5.0"
-eventsourcingdb-es = "0.1.0"
+eventsourcingdb-es = "0.2.0"
 ```
 
 ---
